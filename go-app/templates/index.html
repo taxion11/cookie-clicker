@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.title}}</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Fredoka+One:wght@400&family=Open+Sans:wght@400;600&display=swap"
+        rel="stylesheet">
+</head>
+
+<body>
+    <div class="game-container">
+        <!-- ヘッダー -->
+        <header class="game-header">
+            <h1>🍪 Cookie Clicker</h1>
+            <div class="stats">
+                <div class="stat-item">
+                    <span class="stat-label">Cookies:</span>
+                    <span id="cookie-count" class="stat-value">0</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Per Second:</span>
+                    <span id="cps-count" class="stat-value">0</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="game-content">
+            <!-- 左側：クッキークリックエリア -->
+            <div class="click-area">
+                <div class="cookie-container">
+                    <button id="cookie-button" class="cookie-button">
+                        <div class="cookie-emoji">🍪</div>
+                    </button>
+                    <div id="click-animation" class="click-animation">+1</div>
+                </div>
+
+                <div class="click-stats">
+                    <p>Click Power: <span id="click-power">1</span></p>
+                    <p>Total Clicks: <span id="total-clicks">0</span></p>
+                </div>
+            </div>
+
+            <!-- 右側：アップグレードストア -->
+            <div class="upgrade-area">
+                <h2>🛍️ Cookie Store</h2>
+                <div id="upgrades-list" class="upgrades-list">
+                    <!-- アップグレードアイテムがここに動的に追加される -->
+                </div>
+
+                <div class="game-controls">
+                    <button id="save-game" class="control-button">💾 Save Game</button>
+                    <button id="load-game" class="control-button">📁 Load Game</button>
+                    <button id="reset-game" class="control-button danger">🔄 Reset Game</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 下部：ログエリア -->
+        <div class="log-area">
+            <h3>📰 Game Log</h3>
+            <div id="game-log" class="game-log">
+                <p>🎮 Welcome to Cookie Clicker! Start clicking to earn cookies!</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- ローディング画面 -->
+    <div id="loading" class="loading-overlay">
+        <div class="loading-content">
+            <div class="loading-spinner">🍪</div>
+            <p>Loading your cookie empire...</p>
+        </div>
+    </div>
+
+    <!-- 成果通知 -->
+    <div id="achievement-notification" class="achievement-notification">
+        <div class="achievement-content">
+            <span class="achievement-icon">🏆</span>
+            <span class="achievement-text"></span>
+        </div>
+    </div>
+
+    <script src="/static/js/game.js"></script>
+</body>
+
+</html>

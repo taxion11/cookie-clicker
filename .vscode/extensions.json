@@ -1,0 +1,17 @@
+{
+  "recommendations": [
+    "golang.go",
+    "ms-python.python",
+    "ms-python.flake8",
+    "ms-python.black-formatter",
+    "ms-azuretools.vscode-docker",
+    "redhat.vscode-yaml",
+    "ms-vscode.vscode-json",
+    "bradlc.vscode-tailwindcss",
+    "formulahendry.auto-rename-tag",
+    "esbenp.prettier-vscode",
+    "ms-vscode.makefile-tools",
+    "github.vscode-github-actions",
+    "ms-vscode-remote.remote-containers"
+  ]
+}
