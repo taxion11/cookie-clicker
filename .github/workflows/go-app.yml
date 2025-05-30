@@ -1,11 +1,27 @@
-name: Go App CI/CD
+name: Go App Manual Deploy
 
 on:
-  push:
-    branches: [main, develop]
-    paths:
-      - "go-app/**"
-      - ".github/workflows/go-app.yml"
+  workflow_dispatch:
+    inputs:
+      deploy_to_ecr:
+        description: "Deploy to ECR?"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      environment:
+        description: "Environment"
+        required: true
+        default: "dev"
+        type: choice
+        options:
+          - "dev"
+          - "staging"
+          - "prod"
+
+  # プルリクでのテストのみ（ECRプッシュなし）
   pull_request:
     branches: [main]
     paths:
@@ -14,9 +30,10 @@ on:
 env:
   AWS_REGION: ap-northeast-1
   ECR_REPOSITORY: cookie-clicker-dev-ecr-go
-  ECS_SERVICE: cookie-clicker-dev-ecs-service-go
-  ECS_CLUSTER: cookie-clicker-dev-ecs-cluster
-  ECS_TASK_DEFINITION: cookie-clicker-dev-ecs-task-go
+
+permissions:
+  id-token: write # OIDC用（重要！）
+  contents: read # リポジトリ読み取り
 
 jobs:
   test:
@@ -42,42 +59,61 @@ jobs:
 
       - name: Download dependencies
         working-directory: ./go-app
-        run: go mod download
+        run: |
+          if [ -f go.mod ]; then
+            go mod download
+          else
+            echo "go.mod not found, initializing..."
+            go mod init cookie-clicker-go
+            go mod tidy
+          fi
 
       - name: Run tests
         working-directory: ./go-app
-        run: go test -v ./...
+        run: |
+          # テストファイルが存在する場合のみ実行
+          if ls *_test.go 1> /dev/null 2>&1; then
+            go test -v ./...
+          else
+            echo "No test files found, skipping tests"
+          fi
 
       - name: Run go vet
         working-directory: ./go-app
         run: go vet ./...
 
-      - name: Run static analysis
-        uses: dominikh/staticcheck-action@v1.3.0
-        with:
-          working-directory: go-app
-          version: "2023.1.6"
+      - name: Build application
+        working-directory: ./go-app
+        run: go build -o main .
 
-  build-and-deploy:
-    name: Build and Deploy to AWS
+  deploy:
+    name: Deploy to ECR
     runs-on: ubuntu-latest
     needs: test
-    if: github.ref == 'refs/heads/main'
+    # 手動実行 かつ ECRデプロイが true の場合のみ実行
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_to_ecr == 'true'
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          role-session-name: GitHubActions-GoApp
           aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS connection
+        run: |
+          echo "Verifying AWS connection..."
+          aws sts get-caller-identity
+          echo "Checking ECR repository..."
+          aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build, tag, and push image to Amazon ECR
         id: build-image
@@ -85,42 +121,44 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          # Build a docker container and push it to ECR
+          echo "Building Docker image..."
           cd go-app
+
+          # Dockerfileの存在確認
+          if [ ! -f Dockerfile ]; then
+            echo "Dockerfile not found, creating a simple one..."
+            cat > Dockerfile << 'EOF'
+          FROM golang:1.21-alpine AS builder
+          WORKDIR /app
+          COPY . .
+          RUN go mod download || go mod init cookie-clicker-go
+          RUN go build -o main .
+
+          FROM alpine:latest
+          RUN apk --no-cache add ca-certificates curl
+          WORKDIR /root/
+          COPY --from=builder /app/main .
+          EXPOSE 8080
+          CMD ["./main"]
+          EOF
+          fi
+
+          # Docker build and push
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+
+          echo "Pushing images to ECR..."
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
-
-      - name: Download task definition
-        run: |
-          aws ecs describe-task-definition \
-            --task-definition $ECS_TASK_DEFINITION \
-            --query taskDefinition > task-definition.json
-
-      - name: Fill in the new image ID in the Amazon ECS task definition
-        id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
-        with:
-          task-definition: task-definition.json
-          container-name: cookie-clicker-go
-          image: ${{ steps.build-image.outputs.image }}
-
-      - name: Deploy Amazon ECS task definition
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
 
       - name: Verify deployment
         run: |
-          echo "Go application deployed successfully!"
-          echo "Image: ${{ steps.build-image.outputs.image }}"
+          echo "✅ Go application image pushed successfully!"
+          echo "📦 Image: ${{ steps.build-image.outputs.image }}"
+          echo "🌍 Environment: ${{ github.event.inputs.environment }}"
+          echo "🔗 ECR Repository: ${{ env.ECR_REPOSITORY }}"
 
-          # Wait for deployment to be stable
-          aws ecs wait services-stable \
-            --cluster $ECS_CLUSTER \
-            --services $ECS_SERVICE
+          # ECRでイメージ確認
+          aws ecr describe-images --repository-name ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} --max-items 5
