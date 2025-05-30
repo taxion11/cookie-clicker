@@ -45,6 +45,62 @@ app.add_middleware(
 )
 
 # ==============================================================================
+# 新規追加: CPS計算用ヘルパー関数
+# ==============================================================================
+
+from datetime import datetime
+import time
+
+def get_current_timestamp() -> float:
+    """現在のタイムスタンプ（秒）を取得"""
+    return time.time()
+
+def calculate_current_cookies(game_data: GameData) -> int:
+    """
+    CPS（Cookies Per Second）を考慮した現在のクッキー数を計算
+    """
+    saved_cookies = game_data.cookies
+    last_update = getattr(game_data, 'last_cps_update', None)
+    cps = game_data.cookies_per_second
+    
+    if last_update is None or cps <= 0:
+        return saved_cookies
+    
+    # 前回更新からの経過時間を計算（秒）
+    current_time = get_current_timestamp()
+    
+    # last_updateが文字列の場合はfloatに変換
+    if isinstance(last_update, str):
+        try:
+            last_update = float(last_update)
+        except ValueError:
+            # 変換できない場合は現在時刻を使用
+            last_update = current_time
+    
+    elapsed_seconds = max(0, current_time - last_update)
+    
+    # CPS分のクッキーを追加
+    generated_cookies = int(elapsed_seconds * cps)
+    current_cookies = saved_cookies + generated_cookies
+    
+    logger.info(f"🍪 CPS計算: saved={saved_cookies}, elapsed={elapsed_seconds:.1f}s, cps={cps}, generated={generated_cookies}, total={current_cookies}")
+    
+    return current_cookies
+
+def update_game_data_with_cps(game_data: GameData) -> GameData:
+    """
+    CPS考慮でゲームデータを最新状態に更新
+    """
+    current_cookies = calculate_current_cookies(game_data)
+    
+    # ゲームデータを更新
+    game_data.cookies = current_cookies
+    game_data.last_cps_update = get_current_timestamp()
+    
+    return game_data
+
+
+# ==============================================================================
 # DynamoDB設定
 # ==============================================================================
 
@@ -78,6 +134,7 @@ class GameData(BaseModel):
     click_power: int = Field(default=1, ge=1)
     upgrades: Dict[str, int] = Field(default_factory=dict)
     total_clicks: int = Field(default=0, ge=0)
+    last_cps_update: Optional[float] = None  # 🔥 CPS更新用タイムスタンプ追加
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -267,7 +324,7 @@ async def populate_initial_data():
 # ==============================================================================
 
 def get_user_game_data(user_id: str) -> GameData:
-    """ユーザーのゲームデータを取得"""
+    """ユーザーのゲームデータを取得（CPS考慮）"""
     table = dynamodb.Table(GAME_DATA_TABLE)
     
     try:
@@ -275,12 +332,20 @@ def get_user_game_data(user_id: str) -> GameData:
         
         if 'Item' in response:
             item = dict_decimal_to_int(response['Item'])
-            return GameData(**item)
+            game_data = GameData(**item)
+            
+            # 🔥 CPS考慮で現在のクッキー数を計算
+            game_data = update_game_data_with_cps(game_data)
+            
+            return game_data
         else:
             # 新しいユーザーの場合、デフォルトデータを作成
             now = datetime.now().isoformat()
+            current_timestamp = get_current_timestamp()
+            
             game_data = GameData(
                 user_id=user_id,
+                last_cps_update=current_timestamp,  # 🔥 CPS更新タイムスタンプ設定
                 created_at=now,
                 updated_at=now
             )
@@ -298,14 +363,21 @@ def get_user_game_data(user_id: str) -> GameData:
     except Exception as e:
         logger.error(f"Error getting game data for {user_id}: {str(e)}")
         # エラー時はデフォルトデータを返す
-        return GameData(user_id=user_id)
+        game_data = GameData(user_id=user_id)
+        game_data.last_cps_update = get_current_timestamp()
+        return game_data
 
 def save_user_game_data(game_data: GameData):
-    """ユーザーのゲームデータを保存"""
+    """ユーザーのゲームデータを保存（CPS更新タイムスタンプ付き）"""
     table = dynamodb.Table(GAME_DATA_TABLE)
     
     try:
         now = datetime.now().isoformat()
+        
+        # CPS更新タイムスタンプが未設定の場合は設定
+        if game_data.last_cps_update is None:
+            game_data.last_cps_update = get_current_timestamp()
+        
         game_data.updated_at = now
         
         table.put_item(Item={
@@ -430,8 +502,9 @@ async def health_check():
 
 @app.get("/api/v1/game/{user_id}")
 async def get_game_data(user_id: str):
-    """ゲームデータ取得"""
+    """ゲームデータ取得（CPS考慮の最新クッキー数）"""
     try:
+        # 🔥 CPS考慮でゲームデータを取得
         game_data = get_user_game_data(user_id)
         upgrades = get_user_upgrades(user_id)
         
@@ -439,10 +512,13 @@ async def get_game_data(user_id: str):
         game_data.cookies_per_second = calculate_total_cps(game_data)
         game_data.click_power = calculate_total_click_power(game_data)
         
+        # 🔥 CPS考慮でクッキー数を再計算（最新状態に更新）
+        game_data = update_game_data_with_cps(game_data)
+        
         # 更新されたデータを保存
         save_user_game_data(game_data)
         
-        logger.info(f"Retrieved game data for user: {user_id}")
+        logger.info(f"Retrieved game data for user: {user_id} (cookies: {game_data.cookies}, cps: {game_data.cookies_per_second})")
         
         return {
             "game_data": game_data.dict(),
@@ -456,27 +532,32 @@ async def get_game_data(user_id: str):
 
 @app.post("/api/v1/game/{user_id}/click")
 async def handle_click(user_id: str, request: ClickRequest):
-    """クリック処理"""
+    """クリック処理（CPS考慮）"""
     try:
+        # 🔥 CPS考慮でゲームデータを取得
         game_data = get_user_game_data(user_id)
         
         # クリックパワーを再計算
         actual_click_power = calculate_total_click_power(game_data)
         
-        # クッキーを追加
+        # 🔥 クッキーを追加（CPS分は既に加算済み）
         cookies_earned = actual_click_power
         game_data.cookies += cookies_earned
         game_data.total_clicks += 1
         
+        # 🔥 CPS更新タイムスタンプを現在時刻に設定
+        game_data.last_cps_update = get_current_timestamp()
+        
         # DynamoDBに保存
         save_user_game_data(game_data)
         
-        logger.info(f"User {user_id} clicked: +{cookies_earned} cookies")
+        logger.info(f"User {user_id} clicked: +{cookies_earned} cookies (total: {game_data.cookies})")
         
         return {
             "user_id": user_id,
             "cookies_earned": cookies_earned,
             "total_cookies": game_data.cookies,
+            "cookies_per_second": game_data.cookies_per_second,
             "click_power": actual_click_power,
             "total_clicks": game_data.total_clicks,
             "message": "Click processed successfully"
@@ -488,8 +569,9 @@ async def handle_click(user_id: str, request: ClickRequest):
 
 @app.post("/api/v1/game/{user_id}/upgrade")
 async def purchase_upgrade(user_id: str, request: UpgradeRequest):
-    """アップグレード購入処理"""
+    """アップグレード購入処理（CPS考慮）"""
     try:
+        # 🔥 CPS考慮でゲームデータを取得
         game_data = get_user_game_data(user_id)
         upgrade_id = request.upgrade_id
         
@@ -510,12 +592,17 @@ async def purchase_upgrade(user_id: str, request: UpgradeRequest):
             float(upgrade_info['cost_multiplier'])
         )
         
-        # クッキーが足りるかチェック
-        if game_data.cookies < cost:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Not enough cookies. Need {cost}, have {game_data.cookies}"
-            )
+        # 🔥 クッキーが足りるかチェック（CPS分も含んだ正確な値）
+        current_cookies = game_data.cookies  # CPS考慮済み
+        if current_cookies < cost:
+            return {
+                "user_id": user_id,
+                "upgrade_id": upgrade_id,
+                "success": False,
+                "message": f"Not enough cookies. Need {cost}, have {current_cookies}",
+                "cost": cost,
+                "current_cookies": current_cookies
+            }
         
         # アップグレードを購入
         game_data.cookies -= cost
@@ -525,16 +612,20 @@ async def purchase_upgrade(user_id: str, request: UpgradeRequest):
         game_data.cookies_per_second = calculate_total_cps(game_data)
         game_data.click_power = calculate_total_click_power(game_data)
         
+        # 🔥 CPS更新タイムスタンプを現在時刻に設定
+        game_data.last_cps_update = get_current_timestamp()
+        
         # DynamoDBに保存
         save_user_game_data(game_data)
         
         upgrade_name = upgrade_info['name']
-        logger.info(f"User {user_id} purchased {upgrade_name} for {cost} cookies")
+        logger.info(f"User {user_id} purchased {upgrade_name} for {cost} cookies (remaining: {game_data.cookies})")
         
         return {
             "user_id": user_id,
             "upgrade_id": upgrade_id,
             "upgrade_name": upgrade_name,
+            "success": True,
             "cost": cost,
             "owned_count": game_data.upgrades[upgrade_id],
             "remaining_cookies": game_data.cookies,
@@ -548,6 +639,29 @@ async def purchase_upgrade(user_id: str, request: UpgradeRequest):
     except Exception as e:
         logger.error(f"Error purchasing upgrade for {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to purchase upgrade")
+
+# 🔥 新規追加: CPS同期エンドポイント
+@app.post("/api/v1/game/{user_id}/sync")
+async def sync_cps(user_id: str):
+    """CPS同期処理（フロントエンド用）"""
+    try:
+        # CPS考慮でゲームデータを取得・更新
+        game_data = get_user_game_data(user_id)
+        
+        # 最新状態で保存
+        save_user_game_data(game_data)
+        
+        return {
+            "user_id": user_id,
+            "total_cookies": game_data.cookies,
+            "cookies_per_second": game_data.cookies_per_second,
+            "last_update": game_data.last_cps_update,
+            "message": "CPS synchronized successfully"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error syncing CPS for {user_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to sync CPS")
 
 @app.get("/api/v1/game/{user_id}/save")
 async def save_game_simple(user_id: str):
