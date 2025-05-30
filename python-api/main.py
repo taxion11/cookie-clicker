@@ -6,6 +6,7 @@ Cookie Clicker Game - Python FastAPI Backend with DynamoDB
 
 import os
 import logging
+import time  # 🔥 追加
 from datetime import datetime
 from typing import Dict, List, Optional
 from decimal import Decimal
@@ -43,62 +44,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ==============================================================================
-# 新規追加: CPS計算用ヘルパー関数
-# ==============================================================================
-
-from datetime import datetime
-import time
-
-def get_current_timestamp() -> float:
-    """現在のタイムスタンプ（秒）を取得"""
-    return time.time()
-
-def calculate_current_cookies(game_data: GameData) -> int:
-    """
-    CPS（Cookies Per Second）を考慮した現在のクッキー数を計算
-    """
-    saved_cookies = game_data.cookies
-    last_update = getattr(game_data, 'last_cps_update', None)
-    cps = game_data.cookies_per_second
-    
-    if last_update is None or cps <= 0:
-        return saved_cookies
-    
-    # 前回更新からの経過時間を計算（秒）
-    current_time = get_current_timestamp()
-    
-    # last_updateが文字列の場合はfloatに変換
-    if isinstance(last_update, str):
-        try:
-            last_update = float(last_update)
-        except ValueError:
-            # 変換できない場合は現在時刻を使用
-            last_update = current_time
-    
-    elapsed_seconds = max(0, current_time - last_update)
-    
-    # CPS分のクッキーを追加
-    generated_cookies = int(elapsed_seconds * cps)
-    current_cookies = saved_cookies + generated_cookies
-    
-    logger.info(f"🍪 CPS計算: saved={saved_cookies}, elapsed={elapsed_seconds:.1f}s, cps={cps}, generated={generated_cookies}, total={current_cookies}")
-    
-    return current_cookies
-
-def update_game_data_with_cps(game_data: GameData) -> GameData:
-    """
-    CPS考慮でゲームデータを最新状態に更新
-    """
-    current_cookies = calculate_current_cookies(game_data)
-    
-    # ゲームデータを更新
-    game_data.cookies = current_cookies
-    game_data.last_cps_update = get_current_timestamp()
-    
-    return game_data
-
 
 # ==============================================================================
 # DynamoDB設定
@@ -161,6 +106,58 @@ class UpgradeRequest(BaseModel):
 class SaveGameRequest(BaseModel):
     """ゲーム保存リクエストモデル"""
     game_data: GameData
+
+# ==============================================================================
+# CPS計算用ヘルパー関数（GameData定義後に配置）
+# ==============================================================================
+
+def get_current_timestamp() -> float:
+    """現在のタイムスタンプ（秒）を取得"""
+    return time.time()
+
+def calculate_current_cookies(game_data: GameData) -> int:
+    """
+    CPS（Cookies Per Second）を考慮した現在のクッキー数を計算
+    """
+    saved_cookies = game_data.cookies
+    last_update = game_data.last_cps_update
+    cps = game_data.cookies_per_second
+    
+    if last_update is None or cps <= 0:
+        return saved_cookies
+    
+    # 前回更新からの経過時間を計算（秒）
+    current_time = get_current_timestamp()
+    
+    # last_updateが文字列の場合はfloatに変換
+    if isinstance(last_update, str):
+        try:
+            last_update = float(last_update)
+        except ValueError:
+            # 変換できない場合は現在時刻を使用
+            last_update = current_time
+    
+    elapsed_seconds = max(0, current_time - last_update)
+    
+    # CPS分のクッキーを追加
+    generated_cookies = int(elapsed_seconds * cps)
+    current_cookies = saved_cookies + generated_cookies
+    
+    logger.info(f"🍪 CPS計算: saved={saved_cookies}, elapsed={elapsed_seconds:.1f}s, cps={cps}, generated={generated_cookies}, total={current_cookies}")
+    
+    return current_cookies
+
+def update_game_data_with_cps(game_data: GameData) -> GameData:
+    """
+    CPS考慮でゲームデータを最新状態に更新
+    """
+    current_cookies = calculate_current_cookies(game_data)
+    
+    # ゲームデータを更新
+    game_data.cookies = current_cookies
+    game_data.last_cps_update = get_current_timestamp()
+    
+    return game_data
 
 # ==============================================================================
 # DynamoDBヘルパー関数
@@ -320,7 +317,7 @@ async def populate_initial_data():
     logger.info("Initial upgrade data populated")
 
 # ==============================================================================
-# ヘルパー関数
+# ヘルパー関数（CPS計算対応版）
 # ==============================================================================
 
 def get_user_game_data(user_id: str) -> GameData:
@@ -640,6 +637,25 @@ async def purchase_upgrade(user_id: str, request: UpgradeRequest):
         logger.error(f"Error purchasing upgrade for {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to purchase upgrade")
 
+@app.get("/api/v1/game/{user_id}/save")
+async def save_game_simple(user_id: str):
+    """簡単なゲーム保存処理（GET版）"""
+    try:
+        game_data = get_user_game_data(user_id)
+        save_user_game_data(game_data)
+        
+        logger.info(f"Game auto-saved for user: {user_id}")
+        
+        return {
+            "user_id": user_id,
+            "saved_at": game_data.updated_at,
+            "message": "Game auto-saved successfully"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error auto-saving game for {user_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to auto-save game")
+
 # 🔥 新規追加: CPS同期エンドポイント
 @app.post("/api/v1/game/{user_id}/sync")
 async def sync_cps(user_id: str):
@@ -662,25 +678,6 @@ async def sync_cps(user_id: str):
     except Exception as e:
         logger.error(f"Error syncing CPS for {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to sync CPS")
-
-@app.get("/api/v1/game/{user_id}/save")
-async def save_game_simple(user_id: str):
-    """簡単なゲーム保存処理（GET版）"""
-    try:
-        game_data = get_user_game_data(user_id)
-        save_user_game_data(game_data)
-        
-        logger.info(f"Game auto-saved for user: {user_id}")
-        
-        return {
-            "user_id": user_id,
-            "saved_at": game_data.updated_at,
-            "message": "Game auto-saved successfully"
-        }
-        
-    except Exception as e:
-        logger.error(f"Error auto-saving game for {user_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to auto-save game")
 
 @app.get("/api/v1/stats")
 async def get_global_stats():
