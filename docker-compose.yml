@@ -47,6 +47,13 @@ services:
     networks:
       - cookie-clicker-network
     restart: unless-stopped
+    # 🔥 ヘルスチェック追加
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   # Go Frontend Application
   go-app:
@@ -58,15 +65,32 @@ services:
       - "8080:8080"
     environment:
       - GIN_MODE=debug
+      # 🔥 Service Discovery URL (Docker Compose用)
       - PYTHON_API_URL=http://python-api:8001
       - PORT=8080
     volumes:
       - ./go-app:/app
     depends_on:
-      - python-api
+      python-api:
+        condition: service_healthy # 🔥 Python APIの健全性を待つ
     networks:
       - cookie-clicker-network
     restart: unless-stopped
+    # 🔥 ヘルスチェック追加
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--quiet",
+          "--tries=1",
+          "--spider",
+          "http://localhost:8080/health",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
 # ボリューム定義
 volumes:
